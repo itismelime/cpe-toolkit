@@ -2,10 +2,11 @@
 
 [![License check](https://github.com/itismelime/cpe-toolkit/actions/workflows/license-check.yml/badge.svg)](https://github.com/itismelime/cpe-toolkit/actions/workflows/license-check.yml)
 
-Three scripts, no dependencies (Python stdlib only), MIT licensed:
+Four scripts, no dependencies (Python stdlib only), MIT licensed:
 
 - `cpe_map.py` — map `vendor,product,version` rows to CPE 2.3 strings.
-- `check_status.py` — take `cpe_map.py`'s output and check each product for known vulnerabilities (OSV.dev) and EoL/EoS status (endoflife.date).
+- `check_status.py` — take `cpe_map.py`'s output and check each product for known vulnerabilities (OSV.dev) and EoL/EoS status (endoflife.date). Add `--offline` to check without ever sending your product names to those services — see `sync_offline.py`.
+- `sync_offline.py` — build a local cache of OSV.dev + endoflife.date's full public datasets for private/offline checking.
 - `summarize.py` — turn `check_status.py`'s output into a human-readable per-product summary table.
 
 `aliases.json`, `eol_aliases.json`, and `test.json` in this repo are working example data (Rocket.Chat, Tomcat, OpenSSL, NGINX, Jenkins) — try the full pipeline below against them.
@@ -78,20 +79,45 @@ python3 cpe_map.py products.json
 - Always builds part `a` (application) CPEs — no support for `h` (hardware) or `o` (OS) parts.
 - Formats a CPE string; it does not verify the result against the real NVD CPE dictionary.
 
+## sync_offline.py — private/offline vuln & EoL checking
+
+By default, `check_status.py` sends each product's name and version to OSV.dev and endoflife.date, which necessarily tells those services (and anyone able to observe that traffic) what software you run. If you'd rather not disclose that, `sync_offline.py` downloads each source's **entire public dataset** once — not filtered to your products, so the download itself reveals nothing about your inventory — into a local SQLite cache. `check_status.py --offline` then matches against that cache with no further network calls naming your specific software.
+
+### Usage
+
+```
+python3 sync_offline.py [--cache-dir DIR] [--skip-osv] [--skip-eol]
+```
+
+- `--cache-dir DIR` — where to store `offline.db` (default `~/.cache/cpe-toolkit`).
+- `--skip-osv` — skip the OSV download (~**2.5GB**, all ecosystems) and sync endoflife.date only.
+- `--skip-eol` — skip endoflife.date (small, ~477 products) and sync OSV only.
+
+Run it periodically (e.g. weekly, via cron) to keep the cache fresh — it always re-downloads the full dataset rather than diffing, so expect the OSV sync to take a while on a normal connection. Run with no arguments to execute the built-in self-check instead (uses an in-memory synthetic dataset, no network calls).
+
+### Example
+
+```
+python3 sync_offline.py
+python3 check_status.py test.json --eol-alias eol_aliases.json --offline
+```
+
 ## check_status.py
 
 ### Usage
 
 ```
-python3 check_status.py INPUT_FILE [-o OUTPUT.json] [--eol-alias EOL_ALIASES.json] [--severity {low,medium,high,critical}]
+python3 check_status.py INPUT_FILE [-o OUTPUT.json] [--eol-alias EOL_ALIASES.json] [--severity {low,medium,high,critical}] [--offline] [--cache-dir DIR]
 ```
 
 - `INPUT_FILE` — a `cpe_map.py` JSON output file, or `-` to read from stdin (so it chains directly onto `cpe_map.py`).
 - `-o OUTPUT.json` — write result here instead of stdout.
 - `--eol-alias EOL_ALIASES.json` — JSON object mapping product name to its [endoflife.date](https://endoflife.date) product slug (case-insensitive), e.g. `{"Tomcat": "tomcat"}`. Needed because slugs don't always match product names, and some products (e.g. Rocket.Chat) aren't tracked there at all.
 - `--severity {low,medium,high,critical}` — only include vulnerabilities at or above this severity. Severity is taken from the source's own label when present (e.g. GHSA advisories), otherwise computed as a CVSS v3 base score from the vulnerability's CVSS vector; vulnerabilities with neither are labeled `UNKNOWN` and excluded whenever a `--severity` filter is set.
+- `--offline` — match against a local cache built by `sync_offline.py` instead of calling OSV.dev/endoflife.date live, so your specific product/vendor/version never leaves this machine. Requires `--cache-dir` to point at an existing cache (see below) — errors clearly if it's missing.
+- `--cache-dir DIR` — offline cache location (default `~/.cache/cpe-toolkit`), must match what you passed to `sync_offline.py`.
 
-Requires internet access (queries OSV.dev and endoflife.date live). Run with no arguments to execute the built-in self-check instead (pure logic only, no network calls).
+Requires internet access (queries OSV.dev and endoflife.date live) unless `--offline` is set. Run with no arguments to execute the built-in self-check instead (pure logic only, no network calls).
 
 ### Examples
 

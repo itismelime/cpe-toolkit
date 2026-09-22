@@ -7,10 +7,14 @@ Examples:
 """
 import argparse
 import json
+import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
 from datetime import date
+
+import sync_offline
 
 OSV_URL = "https://api.osv.dev/v1/query"
 EOL_URL = "https://endoflife.date/api/{slug}.json"
@@ -99,6 +103,27 @@ def http_get_json(url, timeout=15):
         raise
 
 
+def _format_vuln(v, severity):
+    return {
+        "id": v.get("id"),
+        "summary": v.get("summary") or (v.get("details") or "")[:200],
+        "severity": severity,
+        "published": v.get("published"),
+        "aliases": v.get("aliases", []),
+        "references": [r["url"] for r in v.get("references", []) if r.get("url")][:3],
+    }
+
+
+def _filter_severity(vulns, min_severity):
+    min_rank = SEVERITY_LEVELS.index(min_severity) if min_severity else 0
+    out = []
+    for v in vulns:
+        severity = vuln_severity(v)
+        if SEVERITY_LEVELS.index(severity) >= min_rank:
+            out.append(_format_vuln(v, severity))
+    return out
+
+
 def query_osv(product, version, min_severity=None):
     """Best-effort: no ecosystem given, so OSV name-matches across all ecosystems
     rather than precisely filtering by version range. Inspect 'affected' yourself."""
@@ -106,23 +131,19 @@ def query_osv(product, version, min_severity=None):
         data = http_post_json(OSV_URL, {"package": {"name": product.lower()}, "version": version})
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"error": str(e)}
-    min_rank = SEVERITY_LEVELS.index(min_severity) if min_severity else 0
-    vulns = []
-    for v in data.get("vulns", []):
-        severity = vuln_severity(v)
-        if SEVERITY_LEVELS.index(severity) < min_rank:
-            continue
-        vulns.append(
-            {
-                "id": v.get("id"),
-                "summary": v.get("summary") or (v.get("details") or "")[:200],
-                "severity": severity,
-                "published": v.get("published"),
-                "aliases": v.get("aliases", []),
-                "references": [r["url"] for r in v.get("references", []) if r.get("url")][:3],
-            }
-        )
-    return vulns
+    return _filter_severity(data.get("vulns", []), min_severity)
+
+
+def query_osv_offline(product, version, conn, min_severity=None):
+    """Same matching semantics as query_osv, but against the local sync_offline.py cache
+    (built from OSV's full bulk export) instead of a live per-product API call."""
+    ids = [r[0] for r in conn.execute("SELECT DISTINCT vuln_id FROM package_index WHERE name = ?", (product.lower(),))]
+    records = []
+    for vid in ids:
+        row = conn.execute("SELECT data FROM vulns WHERE id = ?", (vid,)).fetchone()
+        if row:
+            records.append(json.loads(row[0]))
+    return _filter_severity(records, min_severity)
 
 
 def match_cycle(version, cycles):
@@ -151,14 +172,7 @@ def resolve_eol_slug(product, alias_map):
     return alias_map.get(key, key.replace(" ", "-"))
 
 
-def query_eol(product, version, alias_map):
-    slug = resolve_eol_slug(product, alias_map)
-    try:
-        cycles = http_get_json(EOL_URL.format(slug=slug))
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"tracked": None, "slug": slug, "error": str(e)}
-    if cycles is None:
-        return {"tracked": False, "slug": slug}
+def _format_eol(slug, cycles, version):
     cycle = match_cycle(version, cycles)
     if cycle is None:
         return {"tracked": True, "slug": slug, "matched_cycle": None}
@@ -173,17 +187,36 @@ def query_eol(product, version, alias_map):
     }
 
 
-def check_rows(rows, alias_map, min_severity=None):
+def query_eol(product, version, alias_map):
+    slug = resolve_eol_slug(product, alias_map)
+    try:
+        cycles = http_get_json(EOL_URL.format(slug=slug))
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return {"tracked": None, "slug": slug, "error": str(e)}
+    if cycles is None:
+        return {"tracked": False, "slug": slug}
+    return _format_eol(slug, cycles, version)
+
+
+def query_eol_offline(product, version, alias_map, conn):
+    slug = resolve_eol_slug(product, alias_map)
+    row = conn.execute("SELECT data FROM eol WHERE slug = ?", (slug,)).fetchone()
+    if row is None:
+        return {"tracked": False, "slug": slug}
+    return _format_eol(slug, json.loads(row[0]), version)
+
+
+def check_rows(rows, alias_map, min_severity=None, offline_conn=None):
     results = []
     for row in rows:
         product, version = row.get("product", ""), row.get("version", "")
-        results.append(
-            {
-                **row,
-                "vulnerabilities": query_osv(product, version, min_severity),
-                "eol": query_eol(product, version, alias_map),
-            }
-        )
+        if offline_conn:
+            vulns = query_osv_offline(product, version, offline_conn, min_severity)
+            eol = query_eol_offline(product, version, alias_map, offline_conn)
+        else:
+            vulns = query_osv(product, version, min_severity)
+            eol = query_eol(product, version, alias_map)
+        results.append({**row, "vulnerabilities": vulns, "eol": eol})
     return results
 
 
@@ -197,6 +230,17 @@ def main():
         choices=["low", "medium", "high", "critical"],
         help="only include vulnerabilities at or above this severity",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="match against a local cache (see sync_offline.py) instead of live API calls, "
+        "so your specific product/version never leaves this machine",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=sync_offline.DEFAULT_CACHE_DIR,
+        help=f"offline cache location, must match sync_offline.py's (default: {sync_offline.DEFAULT_CACHE_DIR})",
+    )
     args = parser.parse_args()
 
     alias_map = {}
@@ -204,9 +248,16 @@ def main():
         with open(args.eol_alias, encoding="utf-8") as f:
             alias_map = {k.strip().lower(): v for k, v in json.load(f).items()}
 
+    offline_conn = None
+    if args.offline:
+        db_path = sync_offline.db_path_for(args.cache_dir)
+        if not os.path.exists(db_path):
+            sys.exit(f"No offline cache at {db_path} — run sync_offline.py first.")
+        offline_conn = sqlite3.connect(db_path)
+
     min_severity = args.severity.upper() if args.severity else None
     rows = json.load(sys.stdin) if args.input_file == "-" else json.load(open(args.input_file, encoding="utf-8"))
-    text = json.dumps(check_rows(rows, alias_map, min_severity), indent=2)
+    text = json.dumps(check_rows(rows, alias_map, min_severity, offline_conn), indent=2)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
@@ -237,6 +288,42 @@ def demo():
     assert vuln_severity({"database_specific": {"severity": "HIGH"}}) == "HIGH"
     assert vuln_severity({"severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}) == "CRITICAL"
     assert vuln_severity({}) == "UNKNOWN"
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE vulns (id TEXT PRIMARY KEY, data TEXT);
+        CREATE TABLE package_index (name TEXT, vuln_id TEXT);
+        CREATE TABLE eol (slug TEXT PRIMARY KEY, data TEXT);
+        """
+    )
+    conn.execute(
+        "INSERT INTO vulns VALUES ('T-1', ?)",
+        (json.dumps({"id": "T-1", "summary": "test vuln", "database_specific": {"severity": "HIGH"}}),),
+    )
+    conn.execute("INSERT INTO package_index VALUES ('widget', 'T-1')")
+    conn.execute("INSERT INTO eol VALUES ('widget', ?)", (json.dumps([{"cycle": "9.0", "eol": False}]),))
+    assert query_osv_offline("Widget", "1.0", conn) == [
+        {
+            "id": "T-1",
+            "summary": "test vuln",
+            "severity": "HIGH",
+            "published": None,
+            "aliases": [],
+            "references": [],
+        }
+    ]
+    assert query_osv_offline("Widget", "1.0", conn, min_severity="CRITICAL") == []
+    assert query_eol_offline("Widget", "9.0.1", {}, conn) == {
+        "tracked": True,
+        "slug": "widget",
+        "matched_cycle": "9.0",
+        "latest": None,
+        "is_eol": False,
+        "eol_date": None,
+    }
+    assert query_eol_offline("Nonexistent", "1.0", {}, conn) == {"tracked": False, "slug": "nonexistent"}
+    conn.close()
     print("demo: all checks passed")
 
 
