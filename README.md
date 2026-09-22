@@ -1,4 +1,4 @@
-# cpe-map
+# cpe-toolkit
 
 Two scripts, no dependencies (Python stdlib only):
 
