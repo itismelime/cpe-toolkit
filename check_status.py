@@ -15,6 +15,71 @@ from datetime import date
 OSV_URL = "https://api.osv.dev/v1/query"
 EOL_URL = "https://endoflife.date/api/{slug}.json"
 
+SEVERITY_LEVELS = ["UNKNOWN", "NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+_CVSS3_WEIGHTS = {
+    "AV": {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2},
+    "AC": {"L": 0.77, "H": 0.44},
+    "UI": {"N": 0.85, "R": 0.62},
+    "C": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "I": {"H": 0.56, "L": 0.22, "N": 0.0},
+    "A": {"H": 0.56, "L": 0.22, "N": 0.0},
+}
+_CVSS3_PR_WEIGHTS = {
+    "U": {"N": 0.85, "L": 0.62, "H": 0.27},
+    "C": {"N": 0.85, "L": 0.68, "H": 0.5},
+}
+
+
+def _roundup(x):
+    """CVSS spec's Roundup: nearest 0.1, biased up."""
+    int_x = round(x * 100000)
+    if int_x % 10000 == 0:
+        return int_x / 100000
+    return (int_x // 10000 + 1) / 10
+
+
+def cvss3_base_score(vector):
+    """CVSS v3.x base score (0.0-10.0) from a 'CVSS:3.x/AV:.../...' vector string."""
+    m = dict(p.split(":") for p in vector.split("/") if ":" in p)
+    scope = m["S"]
+    av, ac, ui = _CVSS3_WEIGHTS["AV"][m["AV"]], _CVSS3_WEIGHTS["AC"][m["AC"]], _CVSS3_WEIGHTS["UI"][m["UI"]]
+    pr = _CVSS3_PR_WEIGHTS[scope][m["PR"]]
+    c, i, a = _CVSS3_WEIGHTS["C"][m["C"]], _CVSS3_WEIGHTS["I"][m["I"]], _CVSS3_WEIGHTS["A"][m["A"]]
+
+    iss = 1 - (1 - c) * (1 - i) * (1 - a)
+    impact = 6.42 * iss if scope == "U" else 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15
+    exploitability = 8.22 * av * ac * pr * ui
+
+    if impact <= 0:
+        return 0.0
+    base = impact + exploitability if scope == "U" else 1.08 * (impact + exploitability)
+    return _roundup(min(base, 10.0))
+
+
+def score_to_severity(score):
+    if score == 0.0:
+        return "NONE"
+    if score < 4.0:
+        return "LOW"
+    if score < 7.0:
+        return "MEDIUM"
+    if score < 9.0:
+        return "HIGH"
+    return "CRITICAL"
+
+
+def vuln_severity(vuln_raw):
+    """Prefer the source's own severity label (e.g. GHSA's database_specific.severity);
+    fall back to computing a CVSS v3 base score; UNKNOWN if neither is available."""
+    label = (vuln_raw.get("database_specific") or {}).get("severity")
+    if isinstance(label, str) and label.upper() in SEVERITY_LEVELS:
+        return label.upper()
+    for sev in vuln_raw.get("severity", []):
+        if sev.get("type") == "CVSS_V3" and sev.get("score"):
+            return score_to_severity(cvss3_base_score(sev["score"]))
+    return "UNKNOWN"
+
 
 def http_post_json(url, payload, timeout=15):
     req = urllib.request.Request(
@@ -34,19 +99,24 @@ def http_get_json(url, timeout=15):
         raise
 
 
-def query_osv(product, version):
+def query_osv(product, version, min_severity=None):
     """Best-effort: no ecosystem given, so OSV name-matches across all ecosystems
     rather than precisely filtering by version range. Inspect 'affected' yourself."""
     try:
         data = http_post_json(OSV_URL, {"package": {"name": product.lower()}, "version": version})
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"error": str(e)}
+    min_rank = SEVERITY_LEVELS.index(min_severity) if min_severity else 0
     vulns = []
     for v in data.get("vulns", []):
+        severity = vuln_severity(v)
+        if SEVERITY_LEVELS.index(severity) < min_rank:
+            continue
         vulns.append(
             {
                 "id": v.get("id"),
                 "summary": v.get("summary") or (v.get("details") or "")[:200],
+                "severity": severity,
                 "published": v.get("published"),
                 "aliases": v.get("aliases", []),
                 "references": [r["url"] for r in v.get("references", []) if r.get("url")][:3],
@@ -103,14 +173,14 @@ def query_eol(product, version, alias_map):
     }
 
 
-def check_rows(rows, alias_map):
+def check_rows(rows, alias_map, min_severity=None):
     results = []
     for row in rows:
         product, version = row.get("product", ""), row.get("version", "")
         results.append(
             {
                 **row,
-                "vulnerabilities": query_osv(product, version),
+                "vulnerabilities": query_osv(product, version, min_severity),
                 "eol": query_eol(product, version, alias_map),
             }
         )
@@ -122,6 +192,11 @@ def main():
     parser.add_argument("input_file", help="cpe_map.py JSON output file, or '-' for stdin")
     parser.add_argument("-o", "--output", help="output JSON file (default: stdout)")
     parser.add_argument("--eol-alias", help="JSON file mapping product name -> endoflife.date slug")
+    parser.add_argument(
+        "--severity",
+        choices=["low", "medium", "high", "critical"],
+        help="only include vulnerabilities at or above this severity",
+    )
     args = parser.parse_args()
 
     alias_map = {}
@@ -129,8 +204,9 @@ def main():
         with open(args.eol_alias, encoding="utf-8") as f:
             alias_map = {k.strip().lower(): v for k, v in json.load(f).items()}
 
+    min_severity = args.severity.upper() if args.severity else None
     rows = json.load(sys.stdin) if args.input_file == "-" else json.load(open(args.input_file, encoding="utf-8"))
-    text = json.dumps(check_rows(rows, alias_map), indent=2)
+    text = json.dumps(check_rows(rows, alias_map, min_severity), indent=2)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
@@ -153,6 +229,14 @@ def demo():
 
     assert resolve_eol_slug("Tomcat", {}) == "tomcat"
     assert resolve_eol_slug("Rocket.Chat Support", {"rocket.chat support": "rocketchat"}) == "rocketchat"
+
+    assert cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") == 9.8  # known reference vector
+    assert cvss3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N") == 0.0
+    assert score_to_severity(9.8) == "CRITICAL"
+    assert score_to_severity(0.0) == "NONE"
+    assert vuln_severity({"database_specific": {"severity": "HIGH"}}) == "HIGH"
+    assert vuln_severity({"severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}) == "CRITICAL"
+    assert vuln_severity({}) == "UNKNOWN"
     print("demo: all checks passed")
 
 

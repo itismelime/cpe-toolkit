@@ -78,12 +78,13 @@ python3 cpe_map.py products.json
 ### Usage
 
 ```
-python3 check_status.py INPUT_FILE [-o OUTPUT.json] [--eol-alias EOL_ALIASES.json]
+python3 check_status.py INPUT_FILE [-o OUTPUT.json] [--eol-alias EOL_ALIASES.json] [--severity {low,medium,high,critical}]
 ```
 
 - `INPUT_FILE` — a `cpe_map.py` JSON output file, or `-` to read from stdin (so it chains directly onto `cpe_map.py`).
 - `-o OUTPUT.json` — write result here instead of stdout.
 - `--eol-alias EOL_ALIASES.json` — JSON object mapping product name to its [endoflife.date](https://endoflife.date) product slug (case-insensitive), e.g. `{"Tomcat": "tomcat"}`. Needed because slugs don't always match product names, and some products (e.g. Rocket.Chat) aren't tracked there at all.
+- `--severity {low,medium,high,critical}` — only include vulnerabilities at or above this severity. Severity is taken from the source's own label when present (e.g. GHSA advisories), otherwise computed as a CVSS v3 base score from the vulnerability's CVSS vector; vulnerabilities with neither are labeled `UNKNOWN` and excluded whenever a `--severity` filter is set.
 
 Requires internet access (queries OSV.dev and endoflife.date live). Run with no arguments to execute the built-in self-check instead (pure logic only, no network calls).
 
@@ -108,7 +109,7 @@ Each output row looks like:
   "version": "9.0.65",
   "cpe": "cpe:2.3:a:apache:tomcat:9.0.65:*:*:*:*:*:*:*",
   "vulnerabilities": [
-    {"id": "GHSA-...", "summary": "...", "published": "...", "aliases": ["CVE-..."], "references": ["..."]}
+    {"id": "GHSA-...", "summary": "...", "severity": "HIGH", "published": "...", "aliases": ["CVE-..."], "references": ["..."]}
   ],
   "eol": {
     "tracked": true,
