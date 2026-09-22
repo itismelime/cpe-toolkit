@@ -1,9 +1,14 @@
 # cpe-toolkit
 
-Two scripts, no dependencies (Python stdlib only):
+[![License check](https://github.com/itismelime/cpe-toolkit/actions/workflows/license-check.yml/badge.svg)](https://github.com/itismelime/cpe-toolkit/actions/workflows/license-check.yml)
+
+Three scripts, no dependencies (Python stdlib only), MIT licensed:
 
 - `cpe_map.py` — map `vendor,product,version` rows to CPE 2.3 strings.
 - `check_status.py` — take `cpe_map.py`'s output and check each product for known vulnerabilities (OSV.dev) and EoL/EoS status (endoflife.date).
+- `summarize.py` — turn `check_status.py`'s output into a human-readable per-product summary table.
+
+`aliases.json`, `eol_aliases.json`, and `test.json` in this repo are working example data (Rocket.Chat, Tomcat, OpenSSL, NGINX, Jenkins) — try the full pipeline below against them.
 
 ## cpe_map.py
 
@@ -127,3 +132,39 @@ Each output row looks like:
 - Vulnerabilities come from OSV.dev, queried by product name (lowercased) and version, with no ecosystem specified — this lets it cover non-package-manager software (Tomcat, nginx, OpenSSL) by searching across all ecosystems OSV knows, but means results are name-matched rather than precisely version-filtered the way an ecosystem-scoped query would be. Check each result's `references` if precision matters.
 - EoL/EoS comes from endoflife.date, matched to the closest release-cycle prefix of your version (e.g. `9.0.65` → cycle `9.0`). `"tracked": false` means the product isn't in endoflife.date's dataset (with or without an alias).
 - `eol_date` may be `null` even when `"is_eol": true` — some products are flagged EoL without a specific date on record.
+
+## summarize.py
+
+### Usage
+
+```
+python3 summarize.py INPUT_FILE
+```
+
+- `INPUT_FILE` — a `check_status.py` JSON output file, or `-` to read from stdin.
+
+Run with no arguments to execute the built-in self-check instead.
+
+### Example
+
+```
+$ python3 summarize.py test_report.json
+Rocket.Chat 4.13.0.0
+  vulns: HIGH:1  (total 1)
+  eol:   not tracked on endoflife.date
+Tomcat 9.0.65
+  vulns: CRITICAL:28, HIGH:137, LOW:1, MEDIUM:29, UNKNOWN:135  (total 330)
+  eol:   cycle 9.0, not EOL (date: 2027-03-31)
+```
+
+## Full pipeline
+
+Using the example data already in this repo:
+
+```
+python3 cpe_map.py test.json --vendor-alias aliases.json \
+  | python3 check_status.py - --eol-alias eol_aliases.json \
+  | python3 summarize.py -
+```
+
+`test_report.json` is a saved `check_status.py` run over `test.json`, committed as a worked example.
