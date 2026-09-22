@@ -1,0 +1,12 @@
+name: License check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  license-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: test -f LICENSE || (echo "::error::LICENSE file is missing" && exit 1)
