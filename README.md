@@ -1,10 +1,13 @@
-# cpe_map.py
+# cpe-map
 
-Map `vendor,product,version` rows to CPE 2.3 strings.
+Two scripts, no dependencies (Python stdlib only):
 
-No dependencies (Python stdlib only).
+- `cpe_map.py` — map `vendor,product,version` rows to CPE 2.3 strings.
+- `check_status.py` — take `cpe_map.py`'s output and check each product for known vulnerabilities (OSV.dev) and EoL/EoS status (endoflife.date).
 
-## Usage
+## cpe_map.py
+
+### Usage
 
 ```
 python3 cpe_map.py INPUT_FILE [-o OUTPUT.json] [--vendor-alias ALIASES.json] [--dry-run]
@@ -17,7 +20,7 @@ python3 cpe_map.py INPUT_FILE [-o OUTPUT.json] [--vendor-alias ALIASES.json] [--
 
 Run with no arguments to execute the built-in self-check instead.
 
-## Examples
+### Examples
 
 **products.csv**
 ```csv
@@ -64,8 +67,62 @@ JSON input instead of CSV:
 python3 cpe_map.py products.json
 ```
 
-## Notes
+### Notes
 
 - Fields are normalized for CPE 2.3: lowercased, spaces → underscores, reserved characters (`: ; ( ) ! " # $ % & ' * + , / < = > ? @ [ ] ^ \` { | } ~ \`) backslash-escaped, blank → `*`.
 - Always builds part `a` (application) CPEs — no support for `h` (hardware) or `o` (OS) parts.
 - Formats a CPE string; it does not verify the result against the real NVD CPE dictionary.
+
+## check_status.py
+
+### Usage
+
+```
+python3 check_status.py INPUT_FILE [-o OUTPUT.json] [--eol-alias EOL_ALIASES.json]
+```
+
+- `INPUT_FILE` — a `cpe_map.py` JSON output file, or `-` to read from stdin (so it chains directly onto `cpe_map.py`).
+- `-o OUTPUT.json` — write result here instead of stdout.
+- `--eol-alias EOL_ALIASES.json` — JSON object mapping product name to its [endoflife.date](https://endoflife.date) product slug (case-insensitive), e.g. `{"Tomcat": "tomcat"}`. Needed because slugs don't always match product names, and some products (e.g. Rocket.Chat) aren't tracked there at all.
+
+Requires internet access (queries OSV.dev and endoflife.date live). Run with no arguments to execute the built-in self-check instead (pure logic only, no network calls).
+
+### Examples
+
+Chain directly onto `cpe_map.py`:
+```
+python3 cpe_map.py products.csv --vendor-alias aliases.json | python3 check_status.py - --eol-alias eol_aliases.json
+```
+
+Or from a saved file:
+```
+python3 cpe_map.py products.csv -o cpes.json --vendor-alias aliases.json
+python3 check_status.py cpes.json --eol-alias eol_aliases.json -o report.json
+```
+
+Each output row looks like:
+```json
+{
+  "vendor": "Apache Software Foundation",
+  "product": "Tomcat",
+  "version": "9.0.65",
+  "cpe": "cpe:2.3:a:apache:tomcat:9.0.65:*:*:*:*:*:*:*",
+  "vulnerabilities": [
+    {"id": "GHSA-...", "summary": "...", "published": "...", "aliases": ["CVE-..."], "references": ["..."]}
+  ],
+  "eol": {
+    "tracked": true,
+    "slug": "tomcat",
+    "matched_cycle": "9.0",
+    "latest": "9.0.122",
+    "is_eol": false,
+    "eol_date": "2027-03-31"
+  }
+}
+```
+
+### Notes
+
+- Vulnerabilities come from OSV.dev, queried by product name (lowercased) and version, with no ecosystem specified — this lets it cover non-package-manager software (Tomcat, nginx, OpenSSL) by searching across all ecosystems OSV knows, but means results are name-matched rather than precisely version-filtered the way an ecosystem-scoped query would be. Check each result's `references` if precision matters.
+- EoL/EoS comes from endoflife.date, matched to the closest release-cycle prefix of your version (e.g. `9.0.65` → cycle `9.0`). `"tracked": false` means the product isn't in endoflife.date's dataset (with or without an alias).
+- `eol_date` may be `null` even when `"is_eol": true` — some products are flagged EoL without a specific date on record.
