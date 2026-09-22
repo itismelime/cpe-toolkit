@@ -3,5 +3,25 @@
     "vendor": "Rocket.Chat Support",
     "product": "Rocket.Chat",
     "version": "4.13.0.0"
+  },
+  {
+    "vendor": "Apache Software Foundation",
+    "product": "Tomcat",
+    "version": "9.0.65"
+  },
+  {
+    "vendor": "OpenSSL Software Foundation",
+    "product": "OpenSSL",
+    "version": "3.0.2"
+  },
+  {
+    "vendor": "F5, Inc.",
+    "product": "NGINX",
+    "version": "1.24.0"
+  },
+  {
+    "vendor": "Jenkins Project",
+    "product": "Jenkins",
+    "version": "2.401.1"
   }
 ]

@@ -1,3 +1,7 @@
 {
-  "Rocket.Chat Support": "rocket.chat"
+  "Rocket.Chat Support": "rocket.chat",
+  "Apache Software Foundation": "apache",
+  "OpenSSL Software Foundation": "openssl",
+  "F5, Inc.": "nginx",
+  "Jenkins Project": "jenkins"
 }
