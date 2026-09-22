@@ -11,6 +11,8 @@ import json
 import re
 import sys
 
+__version__ = "1.0.0"
+
 # CPE 2.3 formatted-string reserved characters (escaped with backslash).
 _RESERVED = re.compile(r'[!"#$%&\'()*+,/:;<=>?@\[\]^`{|}~\\]')
 
@@ -55,6 +57,7 @@ def main():
         help="JSON file mapping raw vendor name -> canonical vendor (e.g. {\"Microsoft Corporation\": \"microsoft\"})",
     )
     parser.add_argument("--dry-run", action="store_true", help="print result to stdout, never write -o's file")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
 
     alias_map = {}
