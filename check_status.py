@@ -207,15 +207,22 @@ def query_eol_offline(product, version, alias_map, conn):
 
 
 def check_rows(rows, alias_map, min_severity=None, offline_conn=None):
+    """Caches by (product, version) within this run so a repeated row in the input
+    doesn't trigger duplicate lookups (network requests in live mode)."""
+    cache = {}
     results = []
     for row in rows:
         product, version = row.get("product", ""), row.get("version", "")
-        if offline_conn:
-            vulns = query_osv_offline(product, version, offline_conn, min_severity)
-            eol = query_eol_offline(product, version, alias_map, offline_conn)
-        else:
-            vulns = query_osv(product, version, min_severity)
-            eol = query_eol(product, version, alias_map)
+        key = (product.lower(), version)
+        if key not in cache:
+            if offline_conn:
+                vulns = query_osv_offline(product, version, offline_conn, min_severity)
+                eol = query_eol_offline(product, version, alias_map, offline_conn)
+            else:
+                vulns = query_osv(product, version, min_severity)
+                eol = query_eol(product, version, alias_map)
+            cache[key] = (vulns, eol)
+        vulns, eol = cache[key]
         results.append({**row, "vulnerabilities": vulns, "eol": eol})
     return results
 
@@ -323,6 +330,18 @@ def demo():
         "eol_date": None,
     }
     assert query_eol_offline("Nonexistent", "1.0", {}, conn) == {"tracked": False, "slug": "nonexistent"}
+
+    # check_rows dedups repeated (product, version) rows within one run
+    import unittest.mock as mock
+
+    rows = [
+        {"product": "Widget", "version": "1.0"},
+        {"product": "widget", "version": "1.0"},  # same key, different case
+        {"product": "Widget", "version": "2.0"},  # different version
+    ]
+    with mock.patch("__main__.query_osv_offline", wraps=query_osv_offline) as spy:
+        check_rows(rows, {}, offline_conn=conn)
+        assert spy.call_count == 2, f"expected 2 lookups for 2 unique keys, got {spy.call_count}"
     conn.close()
     print("demo: all checks passed")
 
