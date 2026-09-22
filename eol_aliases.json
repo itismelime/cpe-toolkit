@@ -1,0 +1,6 @@
+{
+  "Tomcat": "tomcat",
+  "OpenSSL": "openssl",
+  "NGINX": "nginx",
+  "Jenkins": "jenkins"
+}
